@@ -1,0 +1,197 @@
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(corrplot)
+
+data <- read.csv("BDD_ENDI_R3_f1_personas.csv", header = T, sep = ";",
+                 na.strings = ".", fileEncoding = "UTF-8-BOM")
+dim(data)
+
+##Seleccion de los registros##
+data <- data %>% filter(prov == "Chimborazo", edaddias < 1826)
+
+##Seleccion de las variables##
+data <- select(.data = data, f1_s1_2, edaddias, altitud, area,
+               f1_s5_4_1, f1_s5_4_2, f1_s5_5_1, f1_s5_5_2,
+               f1_s5_6_1, f1_s5_6_2, f1_s6_3)
+
+##Cambio de nombres de las columnas##
+colnames(data) <- c("sexo", "edad_dias", "altitud", "area",
+                    "peso_1", "peso_2", "longitud_1", "longitud_2",
+                    "talla_1", "talla_2", "hemoglobina")
+
+##Creacion de las variables del modelo##
+data <- data %>% mutate(
+  peso = (peso_1 + peso_2) / 2,
+  estatura = ifelse(is.na(longitud_1), (talla_1 + talla_2) / 2,
+                    (longitud_1 + longitud_2) / 2),
+  edad_meses = edad_dias / 30.4375,
+  sexo = as.factor(sexo),
+  area = as.factor(area))
+
+data <- select(.data = data, peso, estatura, edad_meses, hemoglobina,
+               altitud, sexo, area)
+
+##Exploracion de los datos##
+glimpse(data)
+summary(data)
+sum(is.na(data))
+
+data <- na.omit(data)
+sum(is.na(data))
+nrow(data)
+
+boxplot(data$peso, main = "Peso (kg)")
+boxplot(data$estatura, main = "Estatura (cm)")
+boxplot(data$edad_meses, main = "Edad (meses)")
+boxplot(data$hemoglobina, main = "Hemoglobina (g/dL)")
+boxplot(data$altitud, main = "Altitud (m s. n. m.)")
+
+plot(data$estatura, data$peso, xlab = "Estatura (cm)", ylab = "Peso (kg)")
+plot(data$edad_meses, data$peso, xlab = "Edad (meses)", ylab = "Peso (kg)")
+plot(data$hemoglobina, data$peso, xlab = "Hemoglobina (g/dL)", ylab = "Peso (kg)")
+plot(data$altitud, data$peso, xlab = "Altitud (m s. n. m.)", ylab = "Peso (kg)")
+
+##Rango Intercuartil (peso)##
+q_1 <- quantile(data$peso, 0.25)
+q_3 <- quantile(data$peso, 0.75)
+RIC <- q_3 - q_1
+lim_inf <- q_1 - 1.5 * RIC
+lim_sup <- q_3 + 1.5 * RIC
+lim_inf
+lim_sup
+
+##Atipicos##
+i <- data$peso
+i[i < lim_inf | i > lim_sup]
+
+##Aplicar RIC##
+data <- data %>% filter(peso >= lim_inf & peso <= lim_sup)
+nrow(data)
+boxplot(data$peso, main = "Peso (kg) sin atipicos")
+
+##Matriz de correlacion de Pearson##
+numeric_data <- select(.data = data, where(is.numeric))
+matriz_corr <- cor(numeric_data, method = "pearson")
+print(round(matriz_corr, 3))
+corrplot(matriz_corr, method = "color", type = "upper",
+         tl.col = "black", tl.cex = 0.8, addCoef.col = "black")
+
+##Datos de entrenamiento y validacion (70 % - 30 %)##
+set.seed(123)
+indice <- sample(1:nrow(data), round(0.7 * nrow(data)), replace = F)
+Df_entrena <- data[indice, ]
+Df_valida <- data[-indice, ]
+nrow(Df_entrena)
+nrow(Df_valida)
+
+##Modelo 1: todas las variables explicativas##
+modelo <- lm(peso ~ ., data = Df_entrena)
+summary(modelo)
+
+##Eliminacion progresiva (paso a paso hacia atras)##
+modelo_back <- step(modelo, direction = "backward")
+summary(modelo_back)
+
+##Modelo 2: variables que quedaron despues de la eliminacion progresiva##
+modelo2 <- lm(peso ~ estatura + edad_meses, data = Df_entrena)
+summary(modelo2)
+
+##Modelo 3: solo estatura (para revisar el efecto de la multicolinealidad)##
+modelo3 <- lm(peso ~ estatura, data = Df_entrena)
+summary(modelo3)
+
+##Bondad de ajuste y comparacion de modelos##
+metricas <- function(mod) {
+  e <- residuals(mod)
+  n <- length(e)
+  k <- length(coef(mod)) - 1
+  RMSE <- sqrt(sum(e^2) / (n - k - 1))
+  MAE <- sum(abs(e)) / n
+  R2 <- summary(mod)$r.squared
+  R2_ajustado <- summary(mod)$adj.r.squared
+  AIC <- 2 * log(RMSE) + 2 * (k + 1) / n
+  SBIC <- 2 * log(RMSE) + 2 * (k + 1) * log(n) / n
+  c(k = k, R2 = R2, R2_ajustado = R2_ajustado, RMSE = RMSE, MAE = MAE,
+    AIC = AIC, SBIC = SBIC)
+}
+
+comparacion <- rbind(Modelo_1 = metricas(modelo),
+                     Modelo_2 = metricas(modelo2),
+                     Modelo_3 = metricas(modelo3))
+round(comparacion, 4)
+
+##Verificacion de los supuestos (modelo 2)##
+predichos <- modelo2$fitted.values
+residuos <- modelo2$residuals
+res_est <- rstudent(modelo2)
+
+# Linealidad y homocedasticidad
+plot(predichos, residuos,
+     xlab = "Valores predichos del peso (kg)",
+     ylab = "Residuos",
+     main = "Residuos vs. valores predichos")
+abline(h = 0, col = "red", lty = 2)
+
+# Valores atipicos: residuos estudentizados mayores a 2 y a 3
+sum(abs(res_est) > 2)
+sum(abs(res_est) > 3)
+res_est[abs(res_est) > 3]
+
+# Independencia: residuos estudentizados vs. numero de fila
+plot(1:length(res_est), res_est,
+     xlab = "Numero de fila",
+     ylab = "Residuos estudentizados",
+     main = "Residuos estudentizados vs. numero de fila")
+abline(h = c(-3, -2, 0, 2, 3), col = c("red", "orange", "black", "orange", "red"),
+       lty = 2)
+
+# Normalidad: histograma con curva normal, Shapiro-Wilk y grafico Q-Q
+ggplot(data.frame(res_est), aes(x = res_est)) +
+  geom_histogram(aes(y = after_stat(density)), bins = 30,
+                 fill = "lightblue", color = "black") +
+  stat_function(fun = dnorm, args = list(mean = mean(res_est), sd = sd(res_est)),
+                color = "red", linewidth = 1) +
+  theme_light() +
+  labs(title = "Histograma de los residuos estudentizados",
+       x = "Residuos estudentizados", y = "Densidad")
+
+shapiro.test(res_est)
+
+ggqqplot(res_est, ylab = "Residuos estudentizados")
+
+##Prediccion con los datos de validacion##
+prediccion <- predict(modelo2, newdata = Df_valida)
+Df_valida$Prediccion <- prediccion
+
+error <- Df_valida$peso - Df_valida$Prediccion
+RMSE_valida <- sqrt(mean(error^2))
+MAE_valida <- mean(abs(error))
+R2_valida <- cor(Df_valida$peso, Df_valida$Prediccion)^2
+RMSE_valida
+MAE_valida
+R2_valida
+
+##Grafico de valores reales vs. predichos##
+max_val <- max(Df_valida$peso, Df_valida$Prediccion)
+
+# Regresion forzada a pasar por el origen
+modelo_origen <- lm(peso ~ 0 + Prediccion, data = Df_valida)
+pendiente <- coef(modelo_origen)[1]
+ecuacion_texto <- paste0("y = ", round(pendiente, 2), " * x")
+
+ggplot(Df_valida, aes(x = Prediccion, y = peso)) +
+  geom_point(color = "blue") +
+  geom_abline(intercept = 0, slope = 1, color = "red", linewidth = 1) +
+  geom_abline(intercept = 0, slope = pendiente, color = "green",
+              linetype = "dashed", linewidth = 1) +
+  labs(title = "Peso real vs. peso predicho (datos de validacion)",
+       x = "Peso predicho (kg)",
+       y = "Peso observado (kg)") +
+  scale_x_continuous(limits = c(0, max_val * 1.05)) +
+  scale_y_continuous(limits = c(0, max_val * 1.05)) +
+  coord_fixed() +
+  theme_minimal() +
+  annotate("text", x = max_val * 0.3, y = max_val * 0.95, label = ecuacion_texto,
+           color = "darkgreen", size = 5, fontface = "bold")
+
